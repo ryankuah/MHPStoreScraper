@@ -37,20 +37,52 @@ function MobileHomePark() {
   this.avgRent = null;
   this.rvLots = null;
   this.rvLotRent = null;
+  this.purchaseMethod = null;
+  this.listingID = null;
+  this.postedDate = null;
+  this.updatedDate = null;
 }
 
 function ParkData(desc, data) {
   this.desc = desc;
   this.data = data;
 }
+const args = process.argv.slice(2);
 
-//#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a
+switch (args.length) {
+  case 1:
+    scrapeOne(args[0]);
+    break;
+  case 2:
+    scrapeRange(args[0], args[1]);
+    break;
+}
 
-(async () => {
-  for (let i = 1; i <= 13; i++) {
+async function scrapeDaily() {
+  const browser = await puppeteer.launch();
+  const page = await browser.newPage();
+  await page.goto(
+    "https://www.mobilehomeparkstore.com/mobile-home-parks-for-sale/usa",
+  );
+
+  await page.waitForSelector(
+    "#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a",
+  );
+
+  var pages = await page.evaluate(() => {
+    return document.querySelector(
+      "#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a",
+    ).innerText;
+  });
+
+  await browser.close();
+  for (let i = 1; i <= pages; i++) {
+    console.log("Scraping page " + i);
     const pageLinks = await scrape(
-      `https://www.mobilehomeparkstore.com/mobile-home-parks-for-sale/usa/page/${i}`,
+      `https://www.mobilehomeparkstore.com/mobile-home-parks-for-sale/usa/page/${i}?order=create_desc`,
     );
+    console.log(pageLinks);
+    //TODO:: check to see if link has already been scraped
     const parkResPromises = pageLinks.map((link) => scrapeListing(link));
     var parkRes = await Promise.all(parkResPromises);
     parkRes = parkRes.filter((res) => res !== null);
@@ -62,7 +94,40 @@ function ParkData(desc, data) {
       console.error(error);
     }
   }
-})();
+}
+
+async function scrapeOne(URL) {
+  var temp = await scrapeListing(URL);
+
+  var tempArr = [];
+  tempArr.push(temp);
+  authorize()
+    .then((auth) => updateSpreadsheet(auth, tempArr))
+    .catch(console.error);
+}
+
+//#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a
+//https://www.mobilehomeparkstore.com/mobile-home-parks/sold/all/page/2
+
+async function scrapeRange(start, end) {
+  for (let i = start; i <= end; i++) {
+    console.log("Scraping page " + i);
+    const pageLinks = await scrape(
+      `https://www.mobilehomeparkstore.com/mobile-home-parks/sold/all/page/${i}`,
+    );
+    console.log(pageLinks);
+    const parkResPromises = pageLinks.map((link) => scrapeListing(link));
+    var parkRes = await Promise.all(parkResPromises);
+    parkRes = parkRes.filter((res) => res !== null);
+
+    try {
+      const auth = await authorize();
+      await updateSpreadsheet(auth, parkRes);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+}
 
 /*
 (async () => {
@@ -142,13 +207,15 @@ async function scrapeListing(URL) {
 
   await page.waitForSelector(".page-header");
 
-  const nameLocation = await page.evaluate(() => {
+  var nameLocation = await page.evaluate(() => {
     const headerElement = document.querySelector(".page-header");
     if (!headerElement) return null;
 
     const nameElement = headerElement.querySelector('[itemprop="name"]');
     return nameElement ? nameElement.innerText : null;
   });
+  if (!nameLocation || !nameLocation.split("\n"[1]))
+    nameLocation = "No Info \n No Info";
   park.name = nameLocation.split("\n")[0];
   park.address = nameLocation.split("\n")[1].trim();
 
@@ -172,6 +239,30 @@ async function scrapeListing(URL) {
     );
     return brokerFirmElement ? brokerFirmElement.innerText : null;
   });
+
+  const featureList = await page.evaluate(() => {
+    const featureListElement = document.querySelector(
+      "#content > div.row.justify-content-md-center > div.col-fluid > div > div:nth-child(3) > ul",
+    );
+    if (!featureListElement) return null;
+    var out = [];
+    featureListElement.querySelectorAll("li").forEach((li) => {
+      out.push(li.innerText);
+    });
+    return out;
+  });
+  if (featureList) {
+    var featureData = [];
+    featureList.forEach((feature) => {
+      featureData.push(
+        new ParkData(
+          feature.split(":")[0].trim(),
+          feature.split(":")[1].trim(),
+        ),
+      );
+    });
+    setParkData(park, featureData);
+  }
 
   const dataRows = await page.evaluate(() => {
     var results = [];
@@ -200,10 +291,8 @@ async function scrapeListing(URL) {
   for (let i = 0; i < dataRows.length; i += 2) {
     parkData.push(new ParkData(dataRows[i], dataRows[i + 1]));
   }
-  console.log(parkData);
 
   setParkData(park, parkData);
-  console.log(park);
 
   return park;
 }
@@ -212,23 +301,88 @@ async function findNextEmptyRow(auth) {
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: "1-t9WFMpzCG5TOfQyC2g9RODv_myizlRwDlnUWTX78ow",
-    range: "A:A", // Adjust this range if you want to check another column
+    range: "Test!A:A", // Adjust this range if you want to check another column
   });
   const rows = res.data.values;
   return rows ? rows.length + 1 : 1;
 }
 
 async function updateSpreadsheet(auth, park) {
-  console.log("this" + park);
   const index = await findNextEmptyRow(auth);
-  const range = `A${index}:AE${index + park.length - 1}`;
+  const range = `Test!A${index}:AM${index + park.length - 1}`;
+  console.log(range);
   const _values = [];
   await park.forEach((park) => {
+    let state = null;
+    let county = null;
+    let street = null;
+    let zip = null;
+    if (park.address) {
+      const address = park.address.split(",");
+      switch (address.length) {
+        case 1:
+          let stateTemp = address[0].split(" ").trim();
+          if (stateTemp.length == 3) {
+            state = stateTemp[2];
+          }
+          break;
+        case 2:
+          county = address[0].trim();
+          state = address[1].trim();
+          break;
+        case 3:
+          street = address[0].trim();
+          county = address[1].trim();
+          state = address[2].trim();
+          break;
+        default:
+          street = null;
+          zip = null;
+          city = null;
+          county = null;
+          state = null;
+          break;
+      }
+      let zipTemp = state.split(" ");
+      if (zipTemp.length > 1) {
+        zip = zipTemp[1].trim();
+        state = zipTemp[0].trim();
+      }
+    }
+    if (park.price) {
+      let parkArr = park.price.split(" ");
+      var saleStatus = null;
+      var priceReduced = false;
+      parkArr.forEach((parkArrItem) => {
+        parkArrItem = parkArrItem.trim();
+        switch (parkArrItem) {
+          case "For Sale":
+            saleStatus = "For Sale";
+            break;
+          case "Sale Pending":
+            saleStatus = "Sale Pending";
+            break;
+          case "Sold":
+            saleStatus = "Sold";
+            break;
+          case "Price Reduced":
+            priceReduced = true;
+          default:
+            park.price = parkArrItem;
+            break;
+        }
+      });
+    }
     _values.push([
-      park.name,
-      park.link,
-      park.address,
+      park.listingID,
+      `=HYPERLINK("${park.link}", "${park.name}")`,
+      state,
+      county,
+      street,
+      zip,
       park.price,
+      saleStatus,
+      priceReduced,
       park.broker,
       park.brokerFirm,
       park.desc,
@@ -256,9 +410,11 @@ async function updateSpreadsheet(auth, park) {
       park.avgRent,
       park.rvLots,
       park.rvLotRent,
+      park.purchaseMethod,
+      park.postedDate,
+      park.updatedDate,
     ]);
   });
-  console.log("array" + _values);
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.update({
     spreadsheetId: "1-t9WFMpzCG5TOfQyC2g9RODv_myizlRwDlnUWTX78ow",
@@ -273,7 +429,7 @@ async function updateSpreadsheet(auth, park) {
 function setParkData(park, parkData) {
   parkData.forEach((parkData) => {
     switch (parkData.desc) {
-      case "Occupancy:":
+      case "Total Occupancy:":
         park.occupancy = parkData.data;
         break;
       case "Number of MH Lots:":
@@ -312,10 +468,10 @@ function setParkData(park, parkData) {
       case "Information Type:":
         park.infoType = parkData.data;
         break;
-      case "CAP Rate:":
+      case "Cap Rate":
         park.capRate = parkData.data;
         break;
-      case "Debt Information:":
+      case "Debt Info:":
         park.debtInformation = parkData.data;
         break;
       case "Singlewide Lots:":
@@ -333,17 +489,29 @@ function setParkData(park, parkData) {
       case "Number of Park-owned Homes:":
         park.parkOwned = parkData.data;
         break;
-      case "Average Home Rent:":
+      case "Average Rent for Park-owned Homes:":
         park.avgRent = parkData.data;
         break;
-      case "Num of RV Lots:":
+      case "Number of RV Lots:":
         park.rvLots = parkData.data;
         break;
       case "Average RV Lot Rent:":
         park.rvLotRent = parkData.data;
         break;
+      case "Purchase Method":
+        park.purchaseMethod = parkData.data;
+        break;
+      case "Listing ID":
+        park.listingID = parkData.data;
+        break;
+      case "Posted On":
+        park.postedDate = parkData.data;
+        break;
+      case "Updated On":
+        park.updatedDate = parkData.data;
+        break;
       default:
-        console.log(parkData.desc);
+        console.log(parkData.desc + " - " + park.name);
         break;
     }
   });
