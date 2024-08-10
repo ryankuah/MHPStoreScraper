@@ -5,6 +5,10 @@ const process = require("process");
 const { authenticate } = require("@google-cloud/local-auth");
 const { google } = require("googleapis");
 
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
+const TOKEN_PATH = path.join(process.cwd(), "token.json");
+const CREDENTIALS_PATH = path.join(process.cwd(), "credentials.json");
+
 function MobileHomePark() {
   this.name = null;
   this.link = null;
@@ -56,9 +60,15 @@ switch (args.length) {
   case 2:
     scrapeRange(args[0], args[1]);
     break;
+  default:
+    scrapeDaily();
+    break;
 }
 
 async function scrapeDaily() {
+  console.log("Scraping Daily");
+
+  const auth = await authorize();
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
   await page.goto(
@@ -74,36 +84,52 @@ async function scrapeDaily() {
       "#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a",
     ).innerText;
   });
+  console.log(pages);
 
-  await browser.close();
+  var listings = await readListings(auth);
   for (let i = 1; i <= pages; i++) {
     console.log("Scraping page " + i);
     const pageLinks = await scrape(
       `https://www.mobilehomeparkstore.com/mobile-home-parks-for-sale/usa/page/${i}?order=create_desc`,
+      browser,
     );
     console.log(pageLinks);
     //TODO:: check to see if link has already been scraped
-    const parkResPromises = pageLinks.map((link) => scrapeListing(link));
-    var parkRes = await Promise.all(parkResPromises);
-    parkRes = parkRes.filter((res) => res !== null);
+    const listingsToScrape = pageLinks.filter(
+      (link) => !listings.some((listing) => listing === link),
+    );
+    listings = listings.filter(
+      (link) => !pageLinks.some((listing) => listing === link),
+    );
 
-    try {
-      const auth = await authorize();
-      await updateSpreadsheet(auth, parkRes);
-    } catch (error) {
-      console.error(error);
+    if (listingsToScrape.length != 0) {
+      const parkResPromises = listingsToScrape.map((link) =>
+        scrapeListing(link, browser),
+      );
+      var parkRes = await Promise.all(parkResPromises);
+      parkRes = parkRes.filter((res) => res !== null);
+
+      try {
+        await updateSpreadsheet(auth, parkRes);
+      } catch (error) {
+        console.error(error);
+      }
     }
   }
+  console.log(listings);
+  await browser.close();
 }
 
 async function scrapeOne(URL) {
-  var temp = await scrapeListing(URL);
+  const browser = await puppeteer.launch();
+  var temp = await scrapeListing(URL, browser);
 
   var tempArr = [];
   tempArr.push(temp);
   authorize()
     .then((auth) => updateSpreadsheet(auth, tempArr))
     .catch(console.error);
+  await browser.close();
 }
 
 //#search-results > div.search-results-list > div:nth-child(3) > nav > ul > li:nth-child(6) > a
@@ -143,16 +169,13 @@ async function scrapeRange(start, end) {
 })();
 */
 
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
-const TOKEN_PATH = path.join(process.cwd(), "token.json");
-const CREDENTIALS_PATH = path.join(process.cwd(), "credentials.json");
-
 async function loadSavedCredentialsIfExist() {
   try {
     const content = await fs.readFile(TOKEN_PATH);
     const credentials = JSON.parse(content);
     return google.auth.fromJSON(credentials);
   } catch (err) {
+    console.log(err);
     return null;
   }
 }
@@ -183,8 +206,7 @@ async function authorize() {
   return client;
 }
 
-async function scrape(URL) {
-  const browser = await puppeteer.launch();
+async function scrape(URL, browser) {
   const page = await browser.newPage();
   await page.goto(URL); // Replace with the actual URL
 
@@ -195,11 +217,9 @@ async function scrape(URL) {
     return elements.map((element) => element.href);
   });
 
-  await browser.close();
   return links;
 }
-async function scrapeListing(URL) {
-  const browser = await puppeteer.launch();
+async function scrapeListing(URL, browser) {
   const page = await browser.newPage();
   let park = new MobileHomePark();
   park.link = URL;
@@ -286,7 +306,6 @@ async function scrapeListing(URL) {
     return park;
   }
 
-  await browser.close();
   let parkData = [];
   for (let i = 0; i < dataRows.length; i += 2) {
     parkData.push(new ParkData(dataRows[i], dataRows[i + 1]));
@@ -295,6 +314,26 @@ async function scrapeListing(URL) {
   setParkData(park, parkData);
 
   return park;
+}
+
+async function readListings(auth) {
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: "1-t9WFMpzCG5TOfQyC2g9RODv_myizlRwDlnUWTX78ow",
+    range: "Test!B2:B",
+    valueRenderOption: "FORMULA",
+  });
+  let output = [];
+  if (!res.data.values) {
+    return output;
+  }
+  res.data.values.forEach((row) => {
+    const regex = /=HYPERLINK\(\\"([^\\]*)/;
+    //console.log(`row:${typeof row} regex:${typeof regex}`);
+    //console.log(JSON.stringify(row[0]));
+    output.push(JSON.stringify(row).match(regex)[1]);
+  });
+  return output;
 }
 
 async function findNextEmptyRow(auth) {
@@ -321,7 +360,7 @@ async function updateSpreadsheet(auth, park) {
       const address = park.address.split(",");
       switch (address.length) {
         case 1:
-          let stateTemp = address[0].split(" ").trim();
+          let stateTemp = address[0].split(" ");
           if (stateTemp.length == 3) {
             state = stateTemp[2];
           }
@@ -343,8 +382,8 @@ async function updateSpreadsheet(auth, park) {
           state = null;
           break;
       }
-      let zipTemp = state.split(" ");
-      if (zipTemp.length > 1) {
+      let zipTemp = state ? state.split(" ") : null;
+      if (zipTemp && zipTemp.length > 1) {
         zip = zipTemp[1].trim();
         state = zipTemp[0].trim();
       }
